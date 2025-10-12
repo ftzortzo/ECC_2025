@@ -8,6 +8,6 @@ Do not calibrate or analyze IDM here—IDM is just the trajectory generator. You
 
 Note that here we consider only the case where we have human drivers. Thus for the first human driver we have the special case in section III.c of the paper. I think this is the most interesting case. Next we will consider mixed traffic, which will not change things dramatically. 
 
-I hope this helps. 
+I hope this helps.
 
 
