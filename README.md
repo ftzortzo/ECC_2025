@@ -1,6 +1,6 @@
 # ECC_2025
 
-## Hey Alex!
+## Hello hello!
 
 I have drafted the script you can see in main.m. This script generates human-driving–like trajectories so we can test Bayesian Linear Regression (BLR) without the VR data stream. It uses the standard IDM car-following law (google IDM car following model) on a single straight road: vehicles are initialized with reasonable positions/speeds and per-vehicle IDM parameters; at each step we sort vehicles by position to assign leaders, compute the IDM acceleration (including time headway and dynamic desired gap), and integrate to obtain position, speed, and acceleration traces, which are then plotted.
 
