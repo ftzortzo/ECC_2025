@@ -132,9 +132,13 @@ hold on
 t=0:time_step:Simulation_time;
 
 for i=1:num_vehicles
-    plot(t,vehicles(i).pos);
+    plot(t,vehicles(i).pos,'DisplayName', ['Vehicle ' num2str(i)]);
 end
-
+xlabel('Time (s)');
+ylabel('Position (m)');
+title('Vehicle Positions Over Time');
+legend('show', 'Location', 'best');
+grid on;
 hold off
 
 figure(2);
@@ -144,8 +148,13 @@ hold on
 t=0:time_step:Simulation_time;
 
 for i=1:num_vehicles
-    plot(t,vehicles(i).speed);
+    plot(t,vehicles(i).speed,'DisplayName', ['Vehicle ' num2str(i)]);
 end
+xlabel('Time (s)');
+ylabel('Speed (m/s)');
+title('Vehicle Speeds Over Time');
+legend('show', 'Location', 'best');
+grid on;
 
 hold off
 
@@ -156,7 +165,12 @@ hold on
 t=0:time_step:Simulation_time;
 
 for i=1:num_vehicles
-    plot(t,vehicles(i).acc);
+    plot(t,vehicles(i).acc,'DisplayName', ['Vehicle ' num2str(i)]);
 end
+xlabel('Time (s)');
+ylabel('Acceleration (m/s²)');
+title('Vehicle Accelerations Over Time');
+legend('show', 'Location', 'best');
+grid on;
 
 hold off
