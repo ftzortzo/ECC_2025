@@ -160,3 +160,107 @@ for i=1:num_vehicles
 end
 
 hold off
+
+%% --- NEWELL MODEL & BLR ESTIMATION SECTION
+disp("Starting BLR estimation using IDM trajectories...");
+
+% 1. Extract position/speed data into matrices
+t = 0:time_step:Simulation_time;
+Tlen = numel(t);
+num_vehicles = numel(vehicles);
+P = cell2mat(arrayfun(@(v) v.pos(:), vehicles, 'uni', false)); % (T x N)
+V = cell2mat(arrayfun(@(v) v.speed(:), vehicles, 'uni', false));
+
+% 2. Build leader indices per timestep
+leaders = zeros(Tlen, num_vehicles);
+for ti = 1:Tlen
+    pos_t = arrayfun(@(v) v.pos(ti), vehicles);
+    [~, ord] = sort(pos_t, 'descend');           % larger x = ahead
+    invord = zeros(1, num_vehicles);
+    invord(ord) = 1:num_vehicles;
+    for k = 1:num_vehicles
+        rk = invord(k);                          % rank (1 = front)
+        if rk == 1
+            leaders(ti,k) = 0;                   % no leader
+        else
+            leaders(ti,k) = ord(rk - 1);         % leader = one car ahead
+        end
+    end
+end
+
+
+% 3. Estimate Newell time shifts τ_k(t)
+w = 10;  % backward wave speed (m/s)
+taus_all = nan(Tlen, num_vehicles);
+for k = 1:num_vehicles
+    if k==1, continue; end
+    j = leaders(:,k);
+    if all(j==0), continue; end
+    Pj = P(:,j(find(j>0,1))); % pick a sample leader
+    taus_all(:,k) = estimate_tau_series(t, Pj, P(:,k), w);
+end
+
+% 4. Build dataset for BLR and train model
+[X, Y] = make_blr_dataset(t, P, leaders, taus_all);
+blr = blr_fit(X, Y);
+
+% 5. Predict τ for one follower and plot
+k = 3;
+idx_ok = find(~isnan(taus_all(:,k)));
+Xk = []; Yk = [];
+for ii = idx_ok(:).'
+    j = leaders(ii,k); if j==0, continue; end
+    Xk(end+1,:) = [1, P(ii,k), P(ii,j)];
+    Yk(end+1,1) = taus_all(ii,k);
+end
+[m_tau, v_tau] = blr_predict(blr, Xk);
+
+figure;
+plot(t(idx_ok), Yk, 'k', t(idx_ok), m_tau, 'r', ...
+     t(idx_ok), m_tau + 2*sqrt(v_tau), 'r--', ...
+     t(idx_ok), m_tau - 2*sqrt(v_tau), 'r--');
+xlabel('time (s)'); ylabel('\tau (s)');
+title('BLR prediction vs IDM-derived τ');
+legend('True τ','BLR mean','±2σ band');
+
+% --- Helper functions below ---
+function taus = estimate_tau_series(t, Pj, Pk, w)
+    Fj = griddedInterpolant(t, Pj, 'pchip');
+    taus = nan(size(t)); guess=1.5;
+    for ii=1:numel(t)
+        fun = @(tau) Fj(t(ii)-tau) - w*tau - Pk(ii);
+        try
+            taus(ii)=fzero(fun, guess); guess=max(0.2,min(3,taus(ii)));
+        catch, taus(ii)=NaN; end
+    end
+end
+
+function [X,Y] = make_blr_dataset(t,P,leaders,taus)
+    [T,N] = size(P); X=[]; Y=[];
+    for k=2:N
+        idx=find(~isnan(taus(:,k)));
+        for i=idx(:).'
+            j=leaders(i,k); if j==0, continue; end
+            X(end+1,:)=[1, P(i,k), P(i,j)];
+            Y(end+1,1)=taus(i,k);
+        end
+    end
+end
+
+function model = blr_fit(X,Y)
+    [N,M]=size(X); alpha=1e-3; beta=1/var(Y); I=eye(M);
+    for it=1:200
+        S=inv(alpha*I+beta*(X.'*X)); mu=beta*S*(X.'*Y);
+        gamma=sum(1-alpha*diag(S));
+        alpha_new=gamma/(mu.'*mu); err=Y-X*mu;
+        beta_new=(N-gamma)/(err.'*err);
+        if max(abs([alpha_new-alpha,beta_new-beta]))<1e-6, break; end
+        alpha=alpha_new; beta=beta_new;
+    end
+    model.mu=mu; model.S=S; model.alpha=alpha; model.beta=beta;
+end
+
+function [m,v] = blr_predict(model,Xstar)
+    m = Xstar*model.mu;
+    v = sum((Xstar*model.S).*Xstar,2) + 1/model.beta;
+end
