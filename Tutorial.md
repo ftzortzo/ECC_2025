@@ -12,8 +12,6 @@
    - *(Optional)* **3D Animation Toolbox**
 3. After installation, activate your MATLAB license.
 4. Verify your installation by running:
-   ```matlab
-   ver
 
 
 ---
@@ -45,16 +43,10 @@
    - Export them as `.rrproject` or `.umap` files for Unreal Engine.
 
 
-## 🔌 Step 4 — Install and Link the MATLAB–Unreal Plugin
+##  Step 4 — Install and Link the MATLAB–Unreal Plugin
 
 1. Open MATLAB.
-2. Run the following command to set up the Unreal Engine interface:
-   ```matlab
-   vehdynlib.unrealengine.setup
-
-
-
----
+2. Run the following command to set up the Unreal Engine interface
 
 ###  Step 5 — Create or Open an Unreal Project
 
