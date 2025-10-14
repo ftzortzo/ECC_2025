@@ -122,6 +122,43 @@ for t = 1:N
     end
 end
 
+% Adding Data Extraction
+% dummy var
+training_data = struct([]);
+
+for i = 1:num_vehicles
+    % Find the index where vehicle first exceeds 60 meters from start
+    start_pos = vehicles(i).pos(1);
+    target_pos = start_pos + 60;
+    
+    % Find first index where position >= target_pos
+    idx_60m = find(vehicles(i).pos >= target_pos, 1, 'first');
+    
+    if isempty(idx_60m)
+        % Vehicle didn't travel 60 meters in simulation
+        idx_60m = length(vehicles(i).pos);
+        warning('Vehicle %d did not travel 60 meters. Using all available data.', i);
+    end
+    
+    % Store data for first 60 meters
+    training_data(i).vehicle_id = i;
+    training_data(i).pos = vehicles(i).pos(1:idx_60m);
+    training_data(i).speed = vehicles(i).speed(1:idx_60m);
+    training_data(i).acc = vehicles(i).acc(1:idx_60m);
+    training_data(i).time_indices = 1:idx_60m;
+    training_data(i).actual_distance_traveled = vehicles(i).pos(idx_60m) - vehicles(i).pos(1);
+    
+    % store the vehicle param - should b constants
+    training_data(i).params.a = vehicles(i).a;
+    training_data(i).params.b = vehicles(i).b;
+    training_data(i).params.delta = vehicles(i).delta;
+    training_data(i).params.Length = vehicles(i).Length;
+end
+
+% Save to .mat file
+save('training_data_60m.mat', 'training_data', 'time_step', 'v_des', 'T', 's0');
+fprintf('Training data saved to training_data_60m.mat\n');
+
 
 % Here we plot!
 
