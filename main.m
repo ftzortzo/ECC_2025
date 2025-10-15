@@ -193,11 +193,20 @@ end
 w = 10;  % backward wave speed (m/s)
 taus_all = nan(Tlen, num_vehicles);
 for k = 1:num_vehicles
-    if k==1, continue; end
     j = leaders(:,k);
-    if all(j==0), continue; end
-    Pj = P(:,j(find(j>0,1))); % pick a sample leader
-    taus_all(:,k) = estimate_tau_series(t, Pj, P(:,k), w);
+
+    if any(j > 0)
+        % Case 1: has a real leader at some times
+        % Use that leader's trajectory for tau estimation
+        Pj = P(:, j(find(j>0,1)));  % pick first nonzero leader index
+        taus_all(:,k) = estimate_tau_series(t, Pj, P(:,k), w);
+    else
+        % Case 2: no leader at all (first vehicle)
+        % Use virtual constant-speed leader instead
+        Fj_virtual = make_virtual_leader_interp(t, P(:,k), time_step);
+        Pj_virtual = Fj_virtual(t);
+        taus_all(:,k) = estimate_tau_series(t, Pj_virtual, P(:,k), w);
+    end
 end
 
 % 4. Build dataset for BLR and train model
@@ -263,4 +272,28 @@ end
 function [m,v] = blr_predict(model,Xstar)
     m = Xstar*model.mu;
     v = sum((Xstar*model.S).*Xstar,2) + 1/model.beta;
+end
+
+function Fj = make_virtual_leader_interp(t, Pk, dt)
+% make_virtual_leader_interp:
+% Creates a constant-speed "imaginary" leader trajectory
+
+    % Estimate the follower's average recent speed (use last 1 s)
+    win = max(2, round(1.0/dt));
+    vbar = mean(diff(Pk(max(1,end-win+1):end))) / dt;
+
+    % If speeds are noisy or constant, fallback to global mean
+    if ~isfinite(vbar)
+        vbar = max(0.1, (Pk(end) - Pk(1)) / (t(end) - t(1)));
+    end
+
+    % Set an initial spacing (e.g. 10 m) so the leader starts ahead
+    gap0 = 10;  
+    p0   = Pk(1) + gap0 - vbar * t(1);
+
+    % Define the leader's position trajectory
+    Pj = vbar * t + p0;
+
+    % Return a smooth interpolant so p_j'(t - τ) can be evaluated
+    Fj = griddedInterpolant(t, Pj, 'pchip');
 end
