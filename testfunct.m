@@ -4,7 +4,7 @@ data = load('P_true_data.mat');
 dt = 0.02;
 w = 10;               % backward wave speed (m/s)
 tau_bar = 1.5;        % nominal delay (s)
-g0 = 10;              % headway offset (m)
+g0 = 80;              % headway offset (m)
 Stimulation_Time = 1000;
 N_full = round(Stimulation_Time / dt) + 1;
 
@@ -12,7 +12,7 @@ P_true = data.P_true;
 K = 803;              % number of observed data points
 
 % === Run parameter estimation ===
-[P_pred, pL, mu_tau_k, sigma2_p_k] = parameter_estimation(P_true, K, dt, w, tau_bar, g0, Stimulation_Time);
+[P_pred, pL, sigma2_p_k] = parameter_estimation(P_true, K, dt, w, tau_bar, g0, Stimulation_Time);
 
 %% === Continuous trajectory visualization ===
 figure; hold on;
@@ -56,7 +56,7 @@ hold off;
 
 
 %% === Main Estimation Function ===
-function [P_pred, pL, mu_tau_k, sigma2_p_k] = parameter_estimation(P_true, K, dt, w, tau_bar, g0, Stimulation_Time)
+function [P_pred, pL, sigma2_p_k] = parameter_estimation(P_true, K, dt, w, tau_bar, g0, Stimulation_Time)
     % === Constants ===
     alpha = 2.0;   % BLR prior precision
     beta  = 10.0;  % BLR noise precision
@@ -81,7 +81,7 @@ function [P_pred, pL, mu_tau_k, sigma2_p_k] = parameter_estimation(P_true, K, dt
     % === Interpolation ===
     F_lead_local = griddedInterpolant(t_full, pL, 'pchip');
 
-    % === Step 1: Compute τ_obs (Eq. 29 solver) ===
+    % === Step 1: Compute tau_obs (Eq. 29 solver) ===
     disp("Estimating τ_k (time shift) from observations...");
     tau_obs_all = nan(K-1, 1);
     guess_tau = tau_bar;
@@ -108,34 +108,38 @@ function [P_pred, pL, mu_tau_k, sigma2_p_k] = parameter_estimation(P_true, K, dt
     pk_used = pk_full(valid_idx);
     pj_used = pL(valid_idx);
     
-    % === Step 2: BLR fitting ===
-    X = [ones(numel(pk_used), 1), pk_used(:), pj_used(:)];
-    Y = tau_obs(:);
+% === Step 2: BLR fitting ===
+X = [ones(numel(pk_used), 1), pk_used(:), pj_used(:)];
+Y = tau_obs(:);
 
-    I3 = eye(3);
-    Sigma_theta = inv(beta * (X' * X) + alpha * I3);
-    mu_theta = beta * Sigma_theta * (X' * Y);
+I3 = eye(3);
+Sigma_theta = inv(beta * (X' * X) + alpha * I3);
+mu_theta = beta * Sigma_theta * (X' * Y);
 
-    disp("BLR fitted:"); disp(mu_theta.'); disp(Sigma_theta.');
+disp("BLR fitted:"); 
+disp(mu_theta.'); 
+disp(Sigma_theta.');
 
-    tau_blr_pred = X * mu_theta;
+% --- Time-varying tau_k(t) prediction (Eq. 30) ---
+tau_blr_pred = X * mu_theta;  % τ̂_k(t) = θ0 + θ1*p_k + θ2*p_j
 
-    % === Lemma 2 ===
-    mu_tau_k = mean(tau_blr_pred, 'omitnan');
-    sigma2_tau_k = var(tau_blr_pred, 'omitnan');
+% === Lemma 2 (Eq. 41, time-varying μτₖ(t)) ===
+% Compute μ_p_k(t) using τ̂_k(t)
+t_obs_used = t_obs_full(valid_idx);
+mu_p_k = phi_j1 .* t_obs_used + (phi_j0 - phi_j1 .* tau_blr_pred - w .* tau_blr_pred);
 
-    lambda_k = t_full - mu_tau_k;
-    % eq(38)
-    %mu_p_k = (phi_j1 + w) .* lambda_k + (phi_j0 - w .* t_full);
+% Optional: extend μ_p_k beyond observed window
+mu_p_k_full = interp1(t_obs_used, mu_p_k, t_full, 'linear', 'extrap');
 
-    % eq(41)
-    mu_p_k = phi_j1 .* t_full + (phi_j0 - phi_j1 .* mu_tau_k - w .* mu_tau_k);
-    sigma2_p_k = (phi_j1 + w).^2 .* sigma2_tau_k .* ones(size(t_full));
+% Approximate σ²_p_k from variance of τ̂
+sigma2_tau_k = var(tau_blr_pred, 'omitnan');
+sigma2_p_k = (phi_j1 + w).^2 .* sigma2_tau_k .* ones(size(t_full));
 
-    % === Final predicted trajectory ===
-    P_pred = nan(N_full, 1);
-    P_pred(1:K) = P_true(1:K);
-    P_pred(K+1:end) = mu_p_k(K+1:end);
+% === Final predicted trajectory ===
+P_pred = nan(N_full, 1);
+P_pred(1:K) = P_true(1:K);
+P_pred(K+1:end) = mu_p_k_full(K+1:end);
+
 end
 
 
