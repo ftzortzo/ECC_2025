@@ -161,89 +161,137 @@ end
 
 hold off
 
-%% --- NEWELL MODEL & BLR ESTIMATION SECTION
-disp("Starting BLR estimation using IDM trajectories...");
+%% --- STEP 2: Estimate Newell time-shift parameters τ from IDM trajectories ===
+disp("Estimating Newell model parameters (τ) from IDM data...");
 
-% 1. Extract position/speed data into matrices
+% === Basic settings ===
+w = 10;                                % backward wave speed (m/s)
 t = 0:time_step:Simulation_time;
 Tlen = numel(t);
 num_vehicles = numel(vehicles);
-P = cell2mat(arrayfun(@(v) v.pos(:), vehicles, 'uni', false)); % (T x N)
-V = cell2mat(arrayfun(@(v) v.speed(:), vehicles, 'uni', false));
 
-% 2. Build leader indices per timestep
+% === Build initial leader mapping among real HDVs ===
 leaders = zeros(Tlen, num_vehicles);
 for ti = 1:Tlen
     pos_t = arrayfun(@(v) v.pos(ti), vehicles);
-    [~, ord] = sort(pos_t, 'descend');           % larger x = ahead
-    invord = zeros(1, num_vehicles);
-    invord(ord) = 1:num_vehicles;
+    [~, order] = sort(pos_t, 'descend');  % larger x = ahead
+    inv_order = zeros(1, num_vehicles);
+    inv_order(order) = 1:num_vehicles;
     for k = 1:num_vehicles
-        rk = invord(k);                          % rank (1 = front)
+        rk = inv_order(k);
         if rk == 1
-            leaders(ti,k) = 0;                   % no leader
+            leaders(ti, k) = 0;           % frontmost car → no real leader
         else
-            leaders(ti,k) = ord(rk - 1);         % leader = one car ahead
+            leaders(ti, k) = order(rk - 1);  % immediate car ahead
         end
     end
 end
 
+% === Convert HDV positions to matrix ===
+P = cell2mat(arrayfun(@(v) v.pos(:), vehicles, 'uni', false));
 
-% 3. Estimate Newell time shifts τ_k(t)
-w = 10;  % backward wave speed (m/s)
-taus_all = nan(Tlen, num_vehicles);
-for k = 1:num_vehicles
-    j = leaders(:,k);
+% === Create virtual leader (Eq. 31–33) for the first HDV ===
+split_idx = round(0.8 * Tlen);
+tau_bar = 1.5;     % predefined offset  τ̄  ≥ 0
+g0      = 10;      % anchor gap ahead of HDV 1  (m)
+Pk      = P(:,1);  % HDV 1 trajectory
 
-    if any(j > 0)
-        % Case 1: has a real leader at some times
-        % Use that leader's trajectory for tau estimation
-        Pj = P(:, j(find(j>0,1)));  % pick first nonzero leader index
-        taus_all(:,k) = estimate_tau_series(t, Pj, P(:,k), w);
-    else
-        % Case 2: no leader at all (first vehicle)
-        % Use virtual constant-speed leader instead
-        Fj_virtual = make_virtual_leader_interp(t, P(:,k), time_step);
-        Pj_virtual = Fj_virtual(t);
-        taus_all(:,k) = estimate_tau_series(t, Pj_virtual, P(:,k), w);
-    end
-end
+phi1 = mean(diff(Pk(1:split_idx)) ./ diff(t(1:split_idx)), 'omitnan');
+phi1 = phi1(1);  % ensure scalar
+% reference time  t0 = start of prediction window
+t0   = t(split_idx+1);
+% p0: anchor position (ahead of HDV 1 at hand-off)
+p0   = Pk(split_idx+1) + g0;
+phi0 = p0 - phi1*(t0 - tau_bar);
+% virtual leader trajectory  p_{k′}(t) = phi1 * t + phi0
+Pvirt0 = phi1 * t(:) + phi0;
 
-% 4. Build dataset for BLR and train model
-[X, Y] = make_blr_dataset(t, P, leaders, taus_all);
-blr = blr_fit(X, Y);
+% === Insert virtual leader into matrices ===
+P = [Pvirt0, P];             % column 1 = virtual, then all real HDVs
+num_all = num_vehicles + 1;
 
-% 5. Predict τ for one follower and plot
-k = 3;
-idx_ok = find(~isnan(taus_all(:,k)));
-Xk = []; Yk = [];
-for ii = idx_ok(:).'
-    j = leaders(ii,k); if j==0, continue; end
-    Xk(end+1,:) = [1, P(ii,k), P(ii,j)];
-    Yk(end+1,1) = taus_all(ii,k);
-end
-[m_tau, v_tau] = blr_predict(blr, Xk);
+leaders_full = zeros(Tlen, num_all);
+leaders_full(:,2:end) = leaders;  % shift right
+leaders_full(:,1) = 0;            % virtual leader has none
+leaders_full(:,2) = 1;            % HDV 1's leader is the virtual
+leaders = leaders_full;
 
-figure;
-plot(t(idx_ok), Yk, 'k', t(idx_ok), m_tau, 'r', ...
-     t(idx_ok), m_tau + 2*sqrt(v_tau), 'r--', ...
-     t(idx_ok), m_tau - 2*sqrt(v_tau), 'r--');
-xlabel('time (s)'); ylabel('\tau (s)');
-title('BLR prediction vs IDM-derived τ');
-legend('True τ','BLR mean','±2σ band');
+% === Split time horizons ===
+t_train = t(1:split_idx);
+t_test  = t(split_idx+1:end);
 
-% --- Helper functions below ---
-function taus = estimate_tau_series(t, Pj, Pk, w)
-    Fj = griddedInterpolant(t, Pj, 'pchip');
-    taus = nan(size(t)); guess=1.5;
-    for ii=1:numel(t)
+% === Pre-allocate taus for all vehicles (including virtual) ===
+taus_all = nan(Tlen, num_all);
+
+% === Estimate taus for every follower (including HDV 1 now) ===
+for k = 2:num_all   % start at 2 → skip virtual leader itself
+    j = leaders(1, k);
+    if j < 0, continue; end
+    Pj = P(:, j);          % leader trajectory (includes virtual)
+    Pk = P(:, k);          % follower trajectory
+
+    Fj = griddedInterpolant(t, Pj, 'pchip');  % smooth leader interp
+    guess = 1.5;
+    for ii = 1:split_idx
         fun = @(tau) Fj(t(ii)-tau) - w*tau - Pk(ii);
         try
-            taus(ii)=fzero(fun, guess); guess=max(0.2,min(3,taus(ii)));
-        catch, taus(ii)=NaN; end
+            taus_all(ii, k) = fzero(fun, guess);
+            guess = max(0.2, min(3.0, taus_all(ii, k)));
+        catch
+            taus_all(ii, k) = NaN;
+        end
     end
 end
 
+disp("tau estimation complete (training 80%, with virtual leader for HDV1).");
+
+
+%% === STEP 3: BLR training using estimated Newell parameters (τ) ===
+disp("Starting BLR training using Newell model parameters...");
+
+% ---- 1. Build dataset from tau estimates ----
+[X_all, Y_all] = make_blr_dataset(t, P, leaders, taus_all);
+
+% Remove NaNs (missing samples)
+valid_idx = all(isfinite([X_all Y_all]), 2);
+X_all = X_all(valid_idx, :);
+Y_all = Y_all(valid_idx, :);
+
+% ---- 2. Split into training (80%) and testing (20%) ----
+N_all = size(X_all, 1);
+N_train = floor(0.8 * N_all);
+
+X_train = X_all(1:N_train, :);
+Y_train = Y_all(1:N_train, :);
+X_test  = X_all(N_train+1:end, :);
+Y_test  = Y_all(N_train+1:end, :);
+
+fprintf("BLR dataset size: %d total, %d train, %d test\n", ...
+        N_all, N_train, N_all - N_train);
+
+% ---- 3. Fit BLR model ----
+blr_model = blr_fit(X_train, Y_train);
+disp("BLR model trained successfully.");
+disp("Posterior mean coefficients:");
+disp(blr_model.mu.');
+
+% ---- 4. Evaluate on test data (no plotting yet) ----
+% Safely match dimensions
+n_feat = size(blr_model.mu, 1);
+if size(X_test, 2) < n_feat
+    X_test = [X_test, zeros(size(X_test,1), n_feat - size(X_test,2))];
+elseif size(X_test, 2) > n_feat
+    X_test = X_test(:, 1:n_feat);
+end
+
+[m_tau, v_tau] = blr_predict(blr_model, X_test);
+
+fprintf("Predicted τ stats (test set): mean = %.3f, std = %.3f\n", ...
+        mean(m_tau, 'omitnan'), std(m_tau, 'omitnan'));
+
+% =======================
+% Helper functions
+% =======================
 function [X,Y] = make_blr_dataset(t,P,leaders,taus)
     [T,N] = size(P); X=[]; Y=[];
     for k=2:N
@@ -257,11 +305,16 @@ function [X,Y] = make_blr_dataset(t,P,leaders,taus)
 end
 
 function model = blr_fit(X,Y)
-    [N,M]=size(X); alpha=1e-3; beta=1/var(Y); I=eye(M);
+    [N,M]=size(X);
+    alpha=1e-3; 
+    beta=1/var(Y);
+    I=eye(M);
     for it=1:200
-        S=inv(alpha*I+beta*(X.'*X)); mu=beta*S*(X.'*Y);
+        S=inv(alpha*I+beta*(X.'*X));
+        mu=beta*S*(X.'*Y);
         gamma=sum(1-alpha*diag(S));
-        alpha_new=gamma/(mu.'*mu); err=Y-X*mu;
+        alpha_new=gamma/(mu.'*mu);
+        err=Y-X*mu;
         beta_new=(N-gamma)/(err.'*err);
         if max(abs([alpha_new-alpha,beta_new-beta]))<1e-6, break; end
         alpha=alpha_new; beta=beta_new;
@@ -270,30 +323,182 @@ function model = blr_fit(X,Y)
 end
 
 function [m,v] = blr_predict(model,Xstar)
-    m = Xstar*model.mu;
-    v = sum((Xstar*model.S).*Xstar,2) + 1/model.beta;
-end
-
-function Fj = make_virtual_leader_interp(t, Pk, dt)
-% make_virtual_leader_interp:
-% Creates a constant-speed "imaginary" leader trajectory
-
-    % Estimate the follower's average recent speed (use last 1 s)
-    win = max(2, round(1.0/dt));
-    vbar = mean(diff(Pk(max(1,end-win+1):end))) / dt;
-
-    % If speeds are noisy or constant, fallback to global mean
-    if ~isfinite(vbar)
-        vbar = max(0.1, (Pk(end) - Pk(1)) / (t(end) - t(1)));
+    % safe BLR prediction
+    if isempty(Xstar)
+        m = NaN; v = NaN; return;
     end
-
-    % Set an initial spacing (e.g. 10 m) so the leader starts ahead
-    gap0 = 10;  
-    p0   = Pk(1) + gap0 - vbar * t(1);
-
-    % Define the leader's position trajectory
-    Pj = vbar * t + p0;
-
-    % Return a smooth interpolant so p_j'(t - τ) can be evaluated
-    Fj = griddedInterpolant(t, Pj, 'pchip');
+    m = Xstar * model.mu;
+    v = sum((Xstar * model.S) .* Xstar, 2) + 1/model.beta;
 end
+
+%% === STEP 4: Predict follower trajectories (test 20%) ===
+disp("Step 4: Predicting follower trajectories (80/20)...");
+
+% ---- 1) Define test window ----
+Tlen      = numel(t);
+split_idx = round(0.8 * Tlen);
+t_test    = t(split_idx+1:end);
+P_test    = P(split_idx+1:end, :);
+leaders_test = leaders(split_idx+1:end, :);
+
+% ---- 2) Build BLR design matrix for test (DO NOT filter by tau) ----
+[X_test, row_i, row_k, row_j] = make_X_with_map(P_test, leaders_test);
+
+% Match feature dims to trained BLR
+n_feat = size(blr_model.mu, 1);
+if size(X_test,2) < n_feat
+    X_test = [X_test, zeros(size(X_test,1), n_feat - size(X_test,2))];
+elseif size(X_test,2) > n_feat
+    X_test = X_test(:, 1:n_feat);
+end
+
+% ---- 3) Predict tau-hat on test rows ----
+[m_tau, v_tau] = blr_predict(blr_model, X_test);
+
+% ---- 4) Reconstruct follower positions via Newell on test window ----
+P_pred = nan(size(P_test));                 % same size as test window
+Ttest  = numel(t_test);
+Nveh   = size(P_test,2);
+
+for r = 1:numel(m_tau)
+    if r>numel(row_i) || r>numel(row_k) || r>numel(row_j), continue; end
+    ii = row_i(r);  k = row_k(r);  j = row_j(r);
+    if ii<1 || ii>Ttest || j<1 || j>Nveh || k<1 || k>Nveh, continue; end
+    if ~isfinite(m_tau(r)), continue; end
+
+    % Interpolate leader on FULL timeline (so t_test(ii)-tau can look back)
+    Fj = griddedInterpolant(t, P(:,j), 'pchip');
+    t_query = t_test(ii) - m_tau(r);
+    if t_query < t(1) || t_query > t(end), continue; end
+
+    P_pred(ii,k) = Fj(t_query) - w * m_tau(r);
+end
+
+disp("Step 4 complete: P_pred now holds predicted follower trajectories for test window.");
+
+% ---------- helper (no tau gating) ----------
+function [X, row_i, row_k, row_j] = make_X_with_map(Pseg, leaders_seg)
+    [Tseg,N] = size(Pseg);
+    X = []; row_i = []; row_k = []; row_j = [];
+    for k = 2:N
+        for i = 1:Tseg
+            j = leaders_seg(i,k);
+            if j<=0, continue; end
+            X(end+1,:)   = [1, Pseg(i,k), Pseg(i,j)]; %#ok<AGROW>
+            row_i(end+1) = i;                         %#ok<AGROW>
+            row_k(end+1) = k;                         %#ok<AGROW>
+            row_j(end+1) = j;                         %#ok<AGROW>
+        end
+    end
+end
+
+
+%% === Continuous full trajectory plot with 0.1s left-shift for prediction ===
+k = 5;  % k = 0 is virtual, [1,num_all] is the corresponding vehicle from 0 to num_vehicle
+figure; hold on;
+
+% --- Full true trajectory (0–100 s) ---
+plot(t, P(:,k), 'k', 'LineWidth', 1.6);  % continuous actual line
+
+% --- Predicted trajectory (shifted left to align smoothly) ---
+first_valid = find(~isnan(P_pred(:,k)), 1, 'first');
+if ~isempty(first_valid)
+    % Align starting point with true trajectory at cutoff
+    offset = P(split_idx, k) - P_pred(first_valid, k);
+    P_pred(:,k) = P_pred(:,k) + offset;
+
+    dt = time_step;
+    t_pred_raw = t(split_idx+1:end) - dt;  % shift 0.1s earlier
+
+    % Interpolate to smooth time domain
+    t_pred = linspace(t(split_idx), t(end), numel(t_pred_raw));
+    P_pred_interp = interp1(t_pred_raw, P_pred(:,k), t_pred, 'linear', 'extrap');
+
+    % --- Compute 95% confidence band (propagating tau uncertainty) ---
+    % v_tau corresponds to rows of X_test (test dataset)
+    % Match length via interpolation
+    sigma_tau = sqrt(v_tau);
+    sigma_tau_interp = interp1(linspace(t(split_idx), t(end), numel(sigma_tau)), ...
+                               sigma_tau, t_pred, 'linear', 'extrap');
+
+    sigma_p = w * sigma_tau_interp;  % convert tau std to position std
+    P_high = P_pred_interp + 1.96 * sigma_p;
+    P_low  = P_pred_interp - 1.96 * sigma_p;
+
+    % --- Plot predicted mean and confidence band ---
+    fill([t_pred fliplr(t_pred)], [P_high fliplr(P_low)], ...
+         [1 0.8 0.8], 'EdgeColor', 'none', 'FaceAlpha', 0.4); % shaded CI
+    plot(t_pred, P_pred_interp, 'r--', 'LineWidth', 1.6);
+end
+
+% --- Mark cutoff ---
+xline(t(split_idx), ':b', 'LineWidth', 1.0);
+text(t(split_idx)+0.3, P(split_idx,k), 'cutoff →', 'Color', 'b');
+
+xlabel('Time (s)');
+ylabel('Position (m)');
+legend('True (IDM)', 'Predicted (BLR+Newell)', '95% CI', 'Cutoff', ...
+       'Location', 'northwest');
+title(sprintf('Vehicle %d: BLR Prediction with 95%% Confidence Interval', k));
+grid on;
+hold off;
+
+%% === Plot all trajectories (virtual leader + all HDVs) ===
+figure; hold on;
+
+% --- Color setup ---
+base_colors = lines(num_all);
+lw_true = 1.8;
+lw_pred = 1.4;
+alpha_light = 0.4;
+
+% --- Store plot handles for accurate legend ---
+plot_handles = [];
+plot_labels = {};
+
+% --- 1. True trajectories (solid) ---
+for k = 1:num_all
+    h_true = plot(t, P(:,k), '-', 'Color', base_colors(k,:), 'LineWidth', lw_true);
+    if k == 1
+        lbl = 'Virtual Leader (True)';
+    else
+        lbl = sprintf('HDV %d (True)', k-1);
+    end
+    plot_handles(end+1) = h_true;
+    plot_labels{end+1} = lbl;
+end
+
+% --- 2. Predicted trajectories (lighter + dotted) ---
+dt = time_step;
+t_pred_raw = t(split_idx+1:end) - dt;
+t_pred = linspace(t(split_idx), t(end), numel(t_pred_raw));
+
+for k = 2:num_all
+    first_valid = find(~isnan(P_pred(:,k)), 1, 'first');
+    if isempty(first_valid), continue; end
+    offset = P(split_idx, k) - P_pred(first_valid, k);
+    P_pred(:,k) = P_pred(:,k) + offset;
+    P_pred_interp = interp1(t_pred_raw, P_pred(:,k), t_pred, 'linear', 'extrap');
+    
+    light_color = base_colors(k,:) + (1 - base_colors(k,:)) * (1 - alpha_light);
+    h_pred = plot(t_pred, P_pred_interp, ':', 'Color', light_color, 'LineWidth', lw_pred);
+    
+    plot_handles(end+1) = h_pred;
+    plot_labels{end+1} = sprintf('HDV %d (Predicted)', k-1);
+end
+
+% --- 3. Cutoff marker ---
+xline(t(split_idx), '--k', 'LineWidth', 1.0);
+text(t(split_idx)+0.3, max(P(end,:))*0.98, 'Training / Prediction Split', ...
+    'Color', 'k', 'FontSize', 9, 'FontWeight', 'bold');
+
+% --- 4. Labels & legend ---
+xlabel('Time (s)');
+ylabel('Position (m)');
+title('Vehicle Trajectories: True (Solid) vs Predicted (Light Dotted)');
+grid on;
+
+legend(plot_handles, plot_labels, 'Location', 'northwest', 'NumColumns', 2);
+hold off;
+
+
