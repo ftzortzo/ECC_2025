@@ -12,7 +12,7 @@ P_true = data.P_true;
 K = 803;              % number of observed data points
 
 % === Run parameter estimation ===
-[P_pred, pL, sigma2_p_k] = parameter_estimation(P_true, K, dt, w, tau_bar, g0, Stimulation_Time);
+[P_pred, pL, sigma2_p_k, ignored_1, ignored_2] = parameter_estimation(P_true, K, dt, w, tau_bar, g0, Stimulation_Time);
 
 %% === Continuous trajectory visualization ===
 figure; hold on;
@@ -56,7 +56,7 @@ hold off;
 
 
 %% === Main Estimation Function ===
-function [P_pred, pL, sigma2_p_k] = parameter_estimation(P_true, K, dt, w, tau_bar, g0, Stimulation_Time)
+function [P_pred, pL, sigma2_p_k, phi_k1, phi_k0] = parameter_estimation(P_true, K, dt, w, tau_bar, g0, Stimulation_Time)
     % === Constants ===
     alpha = 2.0;   % BLR prior precision
     beta  = 10.0;  % BLR noise precision
@@ -122,14 +122,14 @@ disp(Sigma_theta.');
 
 % --- Time-varying tau_k(t) prediction (Eq. 30) ---
 tau_blr_pred = X * mu_theta;  % τ̂_k(t) = θ0 + θ1*p_k + θ2*p_j
+xK = [1, P_true(K), pL(K)];
+mu_tau_k = xK * mu_theta;    % local τ̂K
 
 % === Lemma 2 (Eq. 41, time-varying μτₖ(t)) ===
 % Compute μ_p_k(t) using τ̂_k(t)
 t_obs_used = t_obs_full(valid_idx);
-mu_p_k = phi_j1 .* t_obs_used + (phi_j0 - phi_j1 .* tau_blr_pred - w .* tau_blr_pred);
+mu_p_k = phi_j1 .* t_full + (phi_j0 - (phi_j1 + w) * mu_tau_k);
 
-% Optional: extend μ_p_k beyond observed window
-mu_p_k_full = interp1(t_obs_used, mu_p_k, t_full, 'linear', 'extrap');
 
 % Approximate σ²_p_k from variance of τ̂
 sigma2_tau_k = var(tau_blr_pred, 'omitnan');
@@ -138,8 +138,10 @@ sigma2_p_k = (phi_j1 + w).^2 .* sigma2_tau_k .* ones(size(t_full));
 % === Final predicted trajectory ===
 P_pred = nan(N_full, 1);
 P_pred(1:K) = P_true(1:K);
-P_pred(K+1:end) = mu_p_k_full(K+1:end);
+P_pred(K+1:end) = mu_p_k(K+1:end);
 
+phi_k1 = phi_j1;
+phi_k0 = phi_j0 - (phi_j1 + w) * mu_tau_k;
 end
 
 
