@@ -1,62 +1,157 @@
-data = load('P_true_data.mat');
-
-% --- Constants ---
+%% === Constants ===
 dt = 0.02;
 w = 10;               % backward wave speed (m/s)
 tau_bar = 1.5;        % nominal delay (s)
 g0 = 80;              % headway offset (m)
-Stimulation_Time = 1000;
+Stimulation_Time = 400;
 N_full = round(Stimulation_Time / dt) + 1;
 
-P_true = data.P_true;
-K = 803;              % number of observed data points
+%% === Load data ===
+K_first = load("preceding_k.mat", 'K').K;
+K_second = load('follower_k.mat', 'K').K;
 
-% === Run parameter estimation ===
-[P_pred, pL, sigma2_p_k, ignored_1, ignored_2] = parameter_estimation(P_true, K, dt, w, tau_bar, g0, Stimulation_Time);
+traj_first  = load('preceding_p.mat').P;
+traj_second = load('follower_p.mat').P;
 
-%% === Continuous trajectory visualization ===
+traj_first  = traj_first(:);   % ensure column vector
+traj_second = traj_second(:);  % ensure column vector
+offset = 100;
+
+%% === Run parameter estimation ===
+[P_pred, pL, sigma2_p_k, phi1_first, phi0_first] = ...
+    hdv_without_leader(traj_first, K_first, dt, w, tau_bar, g0, Stimulation_Time);
+
+[P_follower_pred, sigma2_p_follower, phi_follower_k1, phi_follower_k0] = ...
+    affine_polynomial(traj_second, P_pred, phi1_first, phi0_first, K_second, dt, w, Stimulation_Time, offset);
+
+%% === Common time vectors ===
+t_obs_first  = (0:dt:(K_first-1)*dt)';      
+t_obs_second = (0:dt:(K_second-1)*dt)';      
+t_full       = (0:dt:Stimulation_Time)';     
+
+%% === Leader confidence interval ===
+sigma_p_k = sqrt(sigma2_p_k);
+P_high_leader = P_pred + 1.96 * sigma_p_k;
+P_low_leader  = P_pred - 1.96 * sigma_p_k;
+
+%% === Follower confidence interval ===
+sigma_p_follower = sqrt(sigma2_p_follower);
+P_high_follower = P_follower_pred + 1.96 * sigma_p_follower;
+P_low_follower  = P_follower_pred - 1.96 * sigma_p_follower;
+
+%% === Plot 1: HDV₁ (Leader) ===
 figure; hold on;
 
-t_obs  = (0:dt:(K-1)*dt)';      % observed time (true data)
-t_full = (0:dt:Stimulation_Time)'; % full time horizon
-sigma_p_k = sqrt(sigma2_p_k);
-P_high = P_pred + 1.96 * sigma_p_k;   % upper 95%
-P_low  = P_pred - 1.96 * sigma_p_k;   % lower 95%
-
-% --- Plot confidence interval bounds (light red lines) ---
-plot(t_full, P_high, 'r:', 'LineWidth', 1.0);
-plot(t_full, P_low,  'r:', 'LineWidth', 1.0);
-
-fill([t_full; flipud(t_full)], [P_high; flipud(P_low)], ...
+% Confidence interval (leader)
+fill([t_full; flipud(t_full)], [P_high_leader; flipud(P_low_leader)], ...
      [1 0.8 0.8], 'EdgeColor', 'none', 'FaceAlpha', 0.3);
 
-% --- Plot actual observed trajectory (deep black) ---
-plot(t_obs, P_true(1:K), 'k', 'LineWidth', 1.8);
+% Observed leader trajectory (black solid)
+plot(t_obs_first, traj_first(1:K_first), 'k', 'LineWidth', 1.8);
 
-% --- Plot virtual leader (blue, dotted) ---
+% Virtual leader (blue dotted)
 plot(t_full, pL, 'b--', 'LineWidth', 1.4);
 
-% --- Plot predicted trajectory (lighter red, dashed) ---
+% Predicted leader (red dashed)
 plot(t_full, P_pred, 'r--', 'LineWidth', 1.6);
 
-% --- Optional: connect smoothly at handoff ---
-plot(t_obs(end), P_true(K), 'ko', 'MarkerFaceColor', 'k');
-text(t_obs(end)+0.3, P_true(K), 'handoff →', 'Color', 'k', 'FontSize', 10);
+% Mark handoff
+plot(t_obs_first(end), traj_first(K_first), 'ko', 'MarkerFaceColor', 'k');
+text(t_obs_first(end)+0.3, traj_first(K_first), 'handoff →', 'Color', 'k', 'FontSize', 10);
 
 xlabel('Time (s)');
 ylabel('Distance to merging point (m)');
-title('Follower Distance Prediction using BLR-based τ_k (Lemma 2)');
-legend({'Observed (True)', 'Virtual Leader', 'Predicted (BLR + Lemma 2)'}, ...
+title('Leader (HDV1) Distance Prediction using BLR-based τ_k (Lemma 2)');
+legend({'95% CI', 'Observed (True)', 'Virtual Leader', 'Predicted (BLR + Lemma 2)'}, ...
        'Location', 'northeast');
+
 xlim([0, min(35, t_full(end))]);
+ylim([0, 1000]);
+grid on; hold off;
+
+
+%% === Plot 2: HDV₂ (Follower) ===
+figure; hold on;
+
+% --- Define valid portion (where prediction exists) ---
+valid_idx = ~isnan(P_follower_pred);
+
+% --- Confidence interval (only where valid) ---
+fill([t_full(valid_idx); flipud(t_full(valid_idx))], ...
+     [P_high_follower(valid_idx); flipud(P_low_follower(valid_idx))], ...
+     [1 0.8 0.8], 'EdgeColor', 'none', 'FaceAlpha', 0.3);
+
+% --- Follower observed trajectory (true data) ---
+% Shift observed time by offset to align with the global timeline
+plot(t_obs_second + offset*dt, traj_second(1:K_second), 'k', 'LineWidth', 1.8);
+
+% --- Follower predicted trajectory ---
+plot(t_full(valid_idx), P_follower_pred(valid_idx), 'r--', 'LineWidth', 1.6);
+
+% --- Leader predicted trajectory (for comparison) ---
+plot(t_full, P_pred, 'b--', 'LineWidth', 1.4);
+
+% --- Mark handoff point (end of observed follower data) ---
+handoff_time = t_obs_second(end) + offset*dt;
+plot(handoff_time, traj_second(K_second), 'ko', 'MarkerFaceColor', 'k');
+text(handoff_time + 0.3, traj_second(K_second), 'handoff →', ...
+     'Color', 'k', 'FontSize', 10);
+
+% --- Labels and formatting ---
+xlabel('Time (s)');
+ylabel('Distance to merging point (m)');
+title('Follower (HDV2) Distance Prediction using BLR + Lemma 2');
+legend({'95% CI', 'Observed (Follower)', 'Predicted (Follower)', 'Leader Predicted'}, ...
+       'Location', 'northeast');
+
+xlim([0, min(40, t_full(end))]);
+ylim([0, 1000]);
+grid on;
+hold off;
+
+
+%% === Plot 3: Combined All Trajectories (HDV₁ + HDV₂ + Virtual Leader) ===
+figure; hold on;
+
+% --- Leader CI ---
+valid_idx_lead = ~isnan(P_pred);
+fill([t_full(valid_idx_lead); flipud(t_full(valid_idx_lead))], ...
+     [P_high_leader(valid_idx_lead); flipud(P_low_leader(valid_idx_lead))], ...
+     [1 0.8 0.8], 'EdgeColor', 'none', 'FaceAlpha', 0.25);
+
+% --- Follower CI ---
+valid_idx_follower = ~isnan(P_follower_pred);
+fill([t_full(valid_idx_follower); flipud(t_full(valid_idx_follower))], ...
+     [P_high_follower(valid_idx_follower); flipud(P_low_follower(valid_idx_follower))], ...
+     [0.9 0.9 1.0], 'EdgeColor', 'none', 'FaceAlpha', 0.25);
+
+% --- Virtual Leader (blue dash-dot) ---
+plot(t_full, pL, 'b-.', 'LineWidth', 1.4);
+
+% --- HDV1 (Leader) observed (black) and predicted (red) ---
+plot(t_obs_first, traj_first(1:K_first), 'k', 'LineWidth', 1.8);
+plot(t_full, P_pred, 'r--', 'LineWidth', 1.6);
+
+% --- HDV2 (Follower) observed (gray) and predicted (magenta) ---
+plot(t_obs_second + offset*dt, traj_second(1:K_second), 'Color', [0.3 0.3 0.3], 'LineWidth', 1.8);
+plot(t_full, P_follower_pred, 'm--', 'LineWidth', 1.6);
+
+xlabel('Time (s)');
+ylabel('Distance to merging point (m)');
+title('All Vehicles: Virtual Leader, HDV₁ (Leader), and HDV₂ (Follower)');
+legend({'HDV₁ 95% CI', 'HDV₂ 95% CI', 'Virtual Leader', ...
+        'HDV₁ Observed', 'HDV₁ Predicted', 'HDV₂ Observed', 'HDV₂ Predicted'}, ...
+        'Location', 'northeast');
+
+xlim([0, min(40, t_full(end))]);
 ylim([0, 1000]);
 grid on;
 hold off;
 
 
 
-%% === Main Estimation Function ===
-function [P_pred, pL, sigma2_p_k, phi_k1, phi_k0] = parameter_estimation(P_true, K, dt, w, tau_bar, g0, Stimulation_Time)
+%% === HDV without leader Estimation Function ===
+function [P_pred, pL, sigma2_p_k, phi_k1, phi_k0] = hdv_without_leader(P_true, K, dt, w, tau_bar, g0, Stimulation_Time)
     % === Constants ===
     alpha = 2.0;   % BLR prior precision
     beta  = 10.0;  % BLR noise precision
@@ -142,6 +237,157 @@ P_pred(K+1:end) = mu_p_k(K+1:end);
 
 phi_k1 = phi_j1;
 phi_k0 = phi_j0 - (phi_j1 + w) * mu_tau_k;
+end
+
+function [P_pred, sigma2_p_k, phi_k1, phi_k0] = affine_polynomial(P_true, P_j, phi_j1, phi_j0, K, dt, w, Stimulation_Time, offset)
+    % This is the follower vehicle that DOES have a leader inside the zone.
+    % Its entry is delayed by `offset` time steps relative to the first HDV.
+    %
+    % We:
+    %   - shift its observed times by offset
+    %   - estimate tau_k(t_i)
+    %   - fit BLR for tau_k
+    %   - compute local mu_tau_k at handoff
+    %   - generate predicted mean using Lemma 2
+    %   - re-anchor that predicted mean so it is C^0 continuous
+    %     with the last observed follower sample
+
+    alpha   = 2.0;
+    beta    = 10.0;
+    N_full  = round(Stimulation_Time / dt) + 1;
+
+    % --- global simulation timeline ---
+    t_full = (0:dt:Stimulation_Time)';  % [N_full x 1]
+
+    % --- follower's "local" observation timeline, shifted in global time ---
+    time_shift   = offset * dt;                                % seconds offset
+    t_obs_full   = (0:dt:(K-1)*dt)' + time_shift;              % when we observed this follower
+    pk_full      = P_true(1:K)';                               % follower's measured positions
+
+    % --- interpolant for LEADER trajectory in global frame ---
+    F_lead_local = griddedInterpolant(t_full, P_j, 'pchip');
+
+    % === STEP 1: estimate tau_k(t_i) using Newell eq (29) ===
+    tau_obs_all = nan(K-1, 1);
+    guess_tau   = 1.5;   % warm-start guess, similar to tau_bar
+
+    for i = 1:(K-1)
+        tk     = t_obs_full(i);   % global time of this sample
+        pk_val = pk_full(i);      % follower position at that time
+
+        % Newell residual:
+        % p_k(tk) ?= p_j(tk - tau) - w * tau
+        f = @(tau) F_lead_local(tk - tau) - w*tau - pk_val;
+
+        try
+            tau_i = fzero(f, guess_tau);
+        catch
+            % fallback bracket
+            try
+                tau_i = fzero(f, [0, 6]);
+            catch
+                tau_i = NaN;
+            end
+        end
+
+        if tau_i < 0
+            tau_i = NaN;
+        end
+
+        tau_obs_all(i) = tau_i;
+        if isfinite(tau_i)
+            guess_tau = tau_i;
+        end
+    end
+
+    valid_idx = isfinite(tau_obs_all);
+    tau_obs   = tau_obs_all(valid_idx);
+
+    % build training data aligned with valid_idx
+    pk_used   = pk_full(valid_idx);
+    pj_used   = F_lead_local(t_obs_full(valid_idx));  % leader position at those global times
+
+    % === STEP 2: BLR fit for tau_k = θ0 + θ1*pk + θ2*pj ===
+    X = [ones(numel(pk_used),1), pk_used(:), pj_used(:)];
+    Y = tau_obs(:);
+
+    I3           = eye(3);
+    Sigma_theta  = inv(beta * (X' * X) + alpha * I3);
+    mu_theta     = beta * Sigma_theta * (X' * Y);
+
+    % === STEP 3: compute local tau at the follower's handoff time ===
+    % follower's last observed sample occurs at global time
+    t_handoff_global = t_obs_full(K);            % global time of Kth sample
+    p_follower_last  = P_true(K);                % last observed follower position
+    p_leader_at_last = F_lead_local(t_handoff_global);
+
+    xK = [1, p_follower_last, p_leader_at_last];
+    mu_tau_k      = xK * mu_theta;                           % mean time shift at handoff
+    sigma2_tau_k  = xK * Sigma_theta * xK.' + 1/beta;        % predictive var of tau at handoff
+
+    % === STEP 4: Generate follower's predicted future using Lemma 2 ===
+    % We need to express time in the follower's LOCAL frame (time since it entered).
+    % Let t_entry_k = time_shift. Then local time for the follower is:
+    %   t_local = max( t_full - t_entry_k, 0 )
+    t_entry_k         = time_shift;
+    t_local_full      = t_full - t_entry_k;
+    t_local_full(t_local_full < 0) = 0;
+
+    % Lemma 2 eq (31):
+    %   mu_p_k_raw(t) = (phi_j1 + w)*(t_local - mu_tau_k) + (phi_j0 - w*t_local)
+    lambda_k          = t_local_full - mu_tau_k;
+    mu_p_k_local_raw  = (phi_j1 + w).*lambda_k + (phi_j0 - w.*t_local_full);
+
+    % Variance from eq (32): constant in time for given mu_tau_k
+    sigma2_p_k = (phi_j1 + w).^2 .* sigma2_tau_k .* ones(size(t_full));
+
+    % === STEP 5: CONTINUITY FIX (anchor the affine continuation) ===
+    % We do NOT want a jump at handoff. We align mu_p_k_local_raw so that at the
+    % last observed sample it matches the actual observed value.
+    %
+    % Index math:
+    %   This follower started at global index start_idx = offset+1 in P_pred.
+    %   The last observed follower sample in that global array is
+    %       end_idx = start_idx + K - 1 = offset + K
+    %
+    start_idx = offset + 1;        % 1-based index in global frame where this follower "starts"
+    end_idx   = start_idx + K - 1; % 1-based index of last observed follower sample
+
+    if end_idx > N_full
+        end_idx = N_full;
+    end
+
+    % local index of that last observed sample in mu_p_k_local_raw:
+    handoff_local_idx = end_idx;   % because mu_p_k_local_raw is indexed by t_full (global)
+    if handoff_local_idx > numel(mu_p_k_local_raw)
+        handoff_local_idx = numel(mu_p_k_local_raw);
+    end
+
+    if handoff_local_idx >= 1 && handoff_local_idx <= numel(mu_p_k_local_raw)
+        anchor_shift = p_follower_last - mu_p_k_local_raw(handoff_local_idx);
+        mu_p_k_local = mu_p_k_local_raw + anchor_shift;
+    else
+        % fallback (shouldn't really happen, but just in case)
+        mu_p_k_local = mu_p_k_local_raw;
+    end
+
+    % === STEP 6: Stitch observed data and the anchored prediction ===
+    P_pred = nan(N_full,1);
+
+    % put the actually observed follower samples at their global slots
+    P_pred(start_idx:end_idx) = P_true(1:(end_idx - start_idx + 1));
+
+    % fill forward from JUST AFTER the last observation
+    fill_start = end_idx + 1;
+    if fill_start <= N_full
+        P_pred(fill_start:end) = mu_p_k_local(fill_start:end);
+    end
+
+    % === STEP 7: follower's own phi_k (pass down to the NEXT vehicle) ===
+    % per (33):   phi_k1 = phi_j1
+    %             phi_k0 = phi_j0 - (phi_j1 + w)*mu_tau_k
+    phi_k1 = phi_j1;
+    phi_k0 = phi_j0 - (phi_j1 + w)*mu_tau_k;
 end
 
 
