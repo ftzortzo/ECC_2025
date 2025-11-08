@@ -1,21 +1,33 @@
 %% === Constants ===
 dt = 0.02;
-w = 10;               % backward wave speed (m/s)
+w = 20;               % backward wave speed (m/s)
 tau_bar = 1.5;        % nominal delay (s)
-g0 = 80;              % headway offset (m)
+g0 = 50;              % headway offset (m)
 Stimulation_Time = 400;
 N_full = round(Stimulation_Time / dt) + 1;
 
-%% === Load data ===
+%% === Load data HDVs ONLY ===
+traj_first  = load('preceding_p.mat').P;
 K_first = load("preceding_k.mat", 'K').K;
+
+traj_second = load('follower_p.mat').P;
 K_second = load('follower_k.mat', 'K').K;
 
-traj_first  = load('preceding_p.mat').P;
-traj_second = load('follower_p.mat').P;
+traj_first  = -traj_first(:);   % ensure column vector
+traj_second = -traj_second(:);  % ensure column vector
+offset = 250;
 
-traj_first  = traj_first(:);   % ensure column vector
-traj_second = traj_second(:);  % ensure column vector
-offset = 100;
+%% === Load data CAV INTO HDV ===
+S = load('vehicle_params.mat');
+params = S.params;
+
+phis_cav = [-0.0022  0.6234  -38.3793  597.7930];
+traj_cav  = -params.p_lead(:);
+K_cav  = params.k_lead;
+
+traj_hdv = -params.p_follower(:);
+K_hdv = params.k_follower;
+
 
 %% === Run parameter estimation ===
 [P_pred, pL, sigma2_p_k, phi1_first, phi0_first] = ...
@@ -148,9 +160,44 @@ ylim([0, 1000]);
 grid on;
 hold off;
 
+[P_hdv_after_cav, phis_pred, sigma2_hdv] = cubic_polynomial( ...
+    phis_cav, traj_cav, K_cav, traj_hdv, K_hdv, dt, w, Stimulation_Time, offset);
+% Time vectors
+t_obs_hdv   = (0:dt:(K_hdv-1)*dt)';        % HDV local time
+t_obs_hdv_g = t_obs_hdv + offset*dt;       % <-- global (shifted) time for HDV
+t_obs_cav   = (0:dt:(K_cav-1)*dt)';        % CAV time (no shift)
+t_full      = (0:dt:Stimulation_Time)';    % global grid
+
+% Confidence interval (only where prediction exists)
+valid = ~isnan(P_hdv_after_cav);
+sigma_hdv = sqrt(sigma2_hdv);
+P_high = P_hdv_after_cav(valid) + 1.96 * sigma_hdv(valid);
+P_low  = P_hdv_after_cav(valid) - 1.96 * sigma_hdv(valid);
+
+figure; hold on;
+fill([t_full(valid); flipud(t_full(valid))], ...
+     [P_high;        flipud(P_low)], ...
+     [1 0.8 0.8], 'EdgeColor', 'none', 'FaceAlpha', 0.35);
+
+% Observed HDV (shifted in time)
+plot(t_obs_hdv_g, traj_hdv(1:K_hdv), 'k', 'LineWidth', 1.8);
+
+% Predicted HDV (only valid part)
+plot(t_full(valid), P_hdv_after_cav(valid), 'r--', 'LineWidth', 1.9);
+
+% CAV leader (for reference; no time shift)
+plot(t_obs_cav, traj_cav(1:K_cav), 'b-.', 'LineWidth', 1.4);
+
+xlabel('Time (s)'); ylabel('Distance to merging point (m)');
+title('Follower (HDV) Prediction when Leader is CAV (Lemma 1 Cubic Model)');
+legend({'95% CI','Observed HDV','Predicted HDV','CAV Leader'}, 'Location','northeast');
+xlim([0, min(40, t_full(end))]);
+ylim([0, 1000]);
+grid on; hold off;
 
 
-%% === HDV without leader Estimation Function ===
+
+%% === Case: HDV without leader Estimation Function ===
 function [P_pred, pL, sigma2_p_k, phi_k1, phi_k0] = hdv_without_leader(P_true, K, dt, w, tau_bar, g0, Stimulation_Time)
     % === Constants ===
     alpha = 2.0;   % BLR prior precision
@@ -161,17 +208,11 @@ function [P_pred, pL, sigma2_p_k, phi_k1, phi_k0] = hdv_without_leader(P_true, K
     t_obs_full = (0:dt:(K-1)*dt)';   
     pk_full = P_true(1:K)';           
 
-    % === Detect direction ===
-    dir = -1;
-    if pk_full(end) >= pk_full(1)
-        dir = 1;
-    end
-
     % === Time vectors ===
     t_full = (0:dt:Stimulation_Time)'; 
 
     % === Virtual leader ===
-    [phi_j0, phi_j1, pL] = make_virtual_leader(t_full, t_obs_full, pk_full, tau_bar, g0, dir);
+    [phi_j0, phi_j1, pL] = make_virtual_leader(t_full, t_obs_full, pk_full, tau_bar, g0);
 
     % === Interpolation ===
     F_lead_local = griddedInterpolant(t_full, pL, 'pchip');
@@ -307,7 +348,7 @@ function [P_pred, sigma2_p_k, phi_k1, phi_k0] = affine_polynomial(P_true, P_j, p
     pk_used   = pk_full(valid_idx);
     pj_used   = F_lead_local(t_obs_full(valid_idx));  % leader position at those global times
 
-    % === STEP 2: BLR fit for tau_k = θ0 + θ1*pk + θ2*pj ===
+    % % === STEP 2: BLR fit for tau_k = θ0 + θ1*pk + θ2*pj ===
     X = [ones(numel(pk_used),1), pk_used(:), pj_used(:)];
     Y = tau_obs(:);
 
@@ -315,6 +356,7 @@ function [P_pred, sigma2_p_k, phi_k1, phi_k0] = affine_polynomial(P_true, P_j, p
     Sigma_theta  = inv(beta * (X' * X) + alpha * I3);
     mu_theta     = beta * Sigma_theta * (X' * Y);
 
+    
     % === STEP 3: compute local tau at the follower's handoff time ===
     % follower's last observed sample occurs at global time
     t_handoff_global = t_obs_full(K);            % global time of Kth sample
@@ -391,19 +433,158 @@ function [P_pred, sigma2_p_k, phi_k1, phi_k0] = affine_polynomial(P_true, P_j, p
 end
 
 
+%% === Case: CAV leading HDV following Estimation Function ===
+function [P_pred, phis_pred, sigma2_p_k] = cubic_polynomial( ...
+    phis_cav, traj_cav, K_cav, traj_hdv, K_hdv, dt, w, Stimulation_Time, offset)
+
+    % HDV FOLLOWING A CAV USING LEMMA 1 (CUBIC POLYNOMIAL PROPAGATION)
+    % Offset-aware: follower observations occur at global times t = (0:dt:(K_hdv-1)dt) + offset*dt
+
+    % ---- hyper & grids ----
+    alpha  = 2.0;
+    beta   = 10.0;
+    N_full = round(Stimulation_Time / dt) + 1;
+
+    t_full      = (0:dt:Stimulation_Time)';     % global timeline
+    t_obs_hdv   = (0:dt:(K_hdv-1)*dt)';         % follower local timeline
+    t_obs_cav   = (0:dt:(K_cav-1)*dt)';         % CAV observed timeline
+    t_entry_k   = offset * dt;                  % follower entry time (global)
+    t_hdv_glob  = t_obs_hdv + t_entry_k;        % follower observation times in GLOBAL frame
+
+    pk_full = traj_hdv(:);                       % ensure column
+    pj_full = traj_cav(:);                       % ensure column
+
+    % Interpolant for the CAV (leader) in GLOBAL time.
+    % Allow mild extrapolation beyond last sample.
+    F_cav = griddedInterpolant(t_obs_cav, pj_full(1:K_cav), 'pchip', 'linear');
+
+    % === STEP 1: Estimate tau_k(t_i) at follower sample times (GLOBAL) ===
+    tau_obs_all = nan(K_hdv-1,1);
+    guess_tau   = 1.5;
+
+    for i = 1:(K_hdv-1)
+        tk     = t_hdv_glob(i);          % GLOBAL time of this follower sample
+        pk_val = pk_full(i);             % follower position at that time (value only)
+
+        % Newell residual at global time tk:
+        % p_k(tk) ?= p_j(tk - tau) - w*tau
+        f = @(tau) F_cav(tk - tau) - w*tau - pk_val;
+
+        try
+            tau_i = fzero(f, guess_tau);
+        catch
+            % fallback bracket if needed
+            try
+                tau_i = fzero(f, [0, 6]);
+            catch
+                tau_i = NaN;
+            end
+        end
+
+        if tau_i < 0, tau_i = NaN; end
+        tau_obs_all(i) = tau_i;
+        if isfinite(tau_i), guess_tau = tau_i; end
+    end
+
+    valid_idx = isfinite(tau_obs_all);
+    tau_obs   = tau_obs_all(valid_idx);
+    % === DEBUG: τ statistics ===
+    if ~isempty(tau_obs)
+        fprintf("τ mean:  %.4f\n", mean(tau_obs));
+        fprintf("τ std:   %.4f\n", std(tau_obs));
+        fprintf("τ min:   %.4f\n", min(tau_obs));
+        fprintf("τ max:   %.4f\n", max(tau_obs));
+    else
+        fprintf("Error no τ estimates\n");
+    end
+    fprintf("-----------------------------------------\n\n");
+
+    % build BLR design using GLOBAL times (critical!)
+    pk_used = pk_full(valid_idx);                 
+    pj_used = F_cav(t_hdv_glob(valid_idx));       
+
+    % === STEP 2: BLR fit for  tau_k = θ0 + θ1*pk + θ2*pj  ===
+    X = [ones(numel(pk_used),1), pk_used(:), pj_used(:)];
+    Y = tau_obs(:);
+
+    I3          = eye(3);
+    Sigma_theta = inv(beta*(X.'*X) + alpha*I3);
+    mu_theta    = beta * Sigma_theta * (X.'*Y);
+
+    % === STEP 3: Predict tau at the follower handoff (last observed HDV point, GLOBAL) ===
+    t_handoff_glob = t_hdv_glob(K_hdv);
+    p_hdv_last     = traj_hdv(K_hdv);
+    p_cav_at_last  = F_cav(t_handoff_glob);
+
+    xK         = [1, p_hdv_last, p_cav_at_last];
+    mu_tau_k   = xK * mu_theta;                          % mean time shift at handoff
+    sigma2_tau = xK * Sigma_theta * xK.' + 1/beta;       % predictive variance of tau
+
+    % === STEP 4: Lemma 1 — follower mean is cubic (in time) ===
+    phi_j3 = phis_cav(1);
+    phi_j2 = phis_cav(2);
+    phi_j1 = phis_cav(3);
+    phi_j0 = phis_cav(4);
+
+    % Coefficients for follower cubic (paper's closed-form)
+    phi_k3 = phi_j3;
+    phi_k2 = phi_j2 - 3*phi_j3*mu_tau_k;
+    phi_k1 = phi_j1 - 2*phi_j2*mu_tau_k + 3*phi_j3*(mu_tau_k^2 + sigma2_tau);
+    phi_k0 = phi_j0 - (phi_j1 + w)*mu_tau_k + phi_j2*(mu_tau_k^2 + sigma2_tau) ...
+                       - phi_j3*mu_tau_k*(mu_tau_k^2 + 3*sigma2_tau);
+
+    % Work in FOLLOWER LOCAL time (time since entry)
+    t_local_full         = t_full - t_entry_k;
+    t_local_full(t_local_full < 0) = 0;
+
+    % Mean continuation (local-time cubic)
+    P_local = phi_k3*t_local_full.^3 + phi_k2*t_local_full.^2 + phi_k1*t_local_full + phi_k0;
+
+    % === STEP 5: Variance via Lemma 1 (use λ = t_local - μτ) ===
+    lambda = t_local_full - mu_tau_k;
+    sigma2_p_k = sigma2_tau .* ( ...
+          (phi_j1 + w).^2 ...
+        + 4*(phi_j1 + w)*phi_j2.*lambda ...
+        + 6*(phi_j1 + w)*phi_j3.*(lambda.^2 + sigma2_tau) ...
+        + 4*(phi_j2.^2).*(lambda.^2 + sigma2_tau) ...
+        + 12*phi_j2*phi_j3.*(lambda.^3 + 3*lambda.*sigma2_tau) ...
+        + 9*(phi_j3.^2).*(lambda.^4 + 6*(lambda.^2).*sigma2_tau + 3*(sigma2_tau.^2)) );
+
+    % === STEP 6: Place observed follower in the GLOBAL array, then stitch ===
+    start_idx = offset + 1;                 
+    end_idx   = min(start_idx + K_hdv - 1, N_full);
+
+    % continuity anchor at handoff (global index == end_idx)
+    anchor_shift      = traj_hdv(K_hdv) - P_local(end_idx);
+    P_local_shifted   = P_local + anchor_shift;
+
+    % build final prediction
+    P_pred            = nan(N_full,1);
+    P_pred(start_idx:end_idx) = traj_hdv(1:(end_idx - start_idx + 1));
+
+    fill_start = end_idx + 1;
+    if fill_start <= N_full
+        P_pred(fill_start:end) = P_local_shifted(fill_start:end);
+    end
+
+    % return follower cubic coefficients
+    phis_pred = [phi_k3, phi_k2, phi_k1, phi_k0];
+end
 
 %% --- Helper: Virtual leader trajectory ---
-function [phi0, phi1, pL] = make_virtual_leader(t_full, t_obs, pf, tau_bar, g0, dir)
-    % Compute slope (velocity magnitude)
-    
-    phi1 = (pf(end) - pf(1)) / (t_obs(end) - t_obs(1));
-    phi1 = dir * abs(phi1);
+function [phi0, phi1, pL] = make_virtual_leader(t_full, t_obs, pf, tau_bar, g0)
+    % Estimate leader speed from a short window near the stitch for robustness
+    win = max(20, round(2 / (t_obs(2)-t_obs(1))));         % ~2 s window
+    i1  = max(1, numel(t_obs)-win);
+    phi1 = (pf(end) - pf(i1)) / (t_obs(end) - t_obs(i1)); % constant speed
 
-    % Initial conditions
+    % Leader starts g0 meters AHEAD at the first observation time t0
     t0 = t_obs(1);
-    p0 = pf(1) + dir * g0;  % leader starts ahead by g0
+    p0 = pf(1) + g0;                  % positions increase => ahead = larger
 
-    % Linear trajectory shifted by tau_bar
+    % Choose phi0 so that pL(t0 - tau_bar) = p0  (time-lead alignment)
     phi0 = p0 - phi1 * (t0 - tau_bar);
+
+    % Leader trajectory on the whole grid
     pL = phi1 * t_full + phi0;
 end
