@@ -62,7 +62,7 @@ addpath(genpath("C:\Matlab_Work"));
 Open PowerShell, navigate to the repository root, and run:
 ```powershell
 cd <repo>
-& "$env:SUMO_HOME\bin\sumo-gui.exe" -c .\siouxfalls_gui.sumocfg --remote-port 8813 --num-clients 1 --delay 0
+& "$env:SUMO_HOME\bin\sumo-gui.exe" -c .\siouxfalls_gui.sumocfg --remote-port 8813 --num-clients 1 --start --delay 50
 ```
 *In the SUMO-GUI:* Go to **View → Zoom to Extent**. Leave the GUI open; MATLAB will control the time advancement.
 
