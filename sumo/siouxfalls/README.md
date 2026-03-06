@@ -66,6 +66,43 @@ cd <repo>
 ```
 *In the SUMO-GUI:* Go to **View → Zoom to Extent**. Leave the GUI open; MATLAB will control the time advancement.
 
+### Step 1b: Start SUMO-GUI as the TraCI Server with Matlab Standalone (No powershell like above step 1)
+Open Matlab, navigate to the repository root, and run:
+```matlab
+sumoExe = fullfile(getenv("SUMO_HOME"), "bin", "sumo-gui.exe");
+cfg     = fullfile(pwd, "siouxfalls_gui.sumocfg");
+port    = 1234 %you can use anything - another example: 8813;
+
+% Launch SUMO-GUI detached (MATLAB will NOT block)
+cmd = sprintf('start "" /B "%s" -c "%s" --remote-port %d --num-clients 1 --start --delay 50', ...
+              sumoExe, cfg, port);
+system(cmd);
+
+% Wait briefly for the TraCI server to start listening
+pause(1.0);
+
+% Now connect
+javaaddpath("C:\Matlab_Work\traci4matlab.jar");
+addpath(genpath("C:\Matlab_Work"));
+[traciV, sumoV] = traci.init(port, 10, '127.0.0.1', 'default');
+disp(traciV); disp(sumoV);
+
+for k = 1:60000
+    traci.simulationStep();
+    if mod(k,200)==0
+        t = traci.simulation.getTime();
+        dep = traci.simulation.getDepartedNumber();
+        arr = traci.simulation.getArrivedNumber();
+        nVeh = numel(traci.vehicle.getIDList());
+        fprintf("t=%.1f departed=%d arrived=%d active=%d\n", t, dep, arr, nVeh);
+    end
+end
+
+traci.close();
+clear global connections message
+```
+*If you did step 1b, you dont do step 2 and should directly see the mock simulation running*
+
 ### Step 2: Connect MATLAB and Step the Simulation
 Run the following script in MATLAB:
 ```matlab
